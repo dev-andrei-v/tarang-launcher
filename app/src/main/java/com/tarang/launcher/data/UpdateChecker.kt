@@ -112,7 +112,10 @@ class UpdateChecker(private val context: Context, private val updateStore: Updat
         return false
     }
 
-    private companion object {
+    companion object {
+        /** Set false while this fork has no release feed of its own. Hides Updates and skips the launch probe. */
+        const val ENABLED = false
+
         const val RELEASES_URL = "https://api.github.com/repos/mohitkyadav/tarang-launcher/releases/latest"
 
         // GitHub's unauthenticated API allows 60 requests/hour; this keeps repeated button taps

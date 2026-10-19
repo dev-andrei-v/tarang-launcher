@@ -6,63 +6,89 @@ import android.net.Uri
 import android.util.Log
 import android.util.LruCache
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.graphics.asImageBitmap
+import com.tarang.launcher.data.DevicePerformance
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
+import java.io.File
 import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URL
 
-/**
- * Loads preview-program poster artwork for the slideshow wallpaper. Posters come back from the
- * TvProvider as either http(s) URLs or content:// URIs (which scheme an app uses varies), so this
- * handles both, decodes down-sampled, caches decoded bitmaps, and logs failures (so an empty
- * slideshow on-device is diagnosable rather than silent).
- */
+/** Loads sampled artwork with a byte budget and one decode at a time. */
 object ArtworkLoader {
     private const val TAG = "ArtworkLoader"
-    private val cache = LruCache<String, ImageBitmap>(32)
+    private val decodePermit = Semaphore(1)
+    private val cache = object : LruCache<String, ImageBitmap>(24 * 1024 * 1024) {
+        override fun sizeOf(key: String, value: ImageBitmap): Int = value.asAndroidBitmap().allocationByteCount
+    }
+
+    fun clearMemory() = cache.evictAll()
 
     suspend fun load(context: Context, uriString: String, reqW: Int = 1280, reqH: Int = 720): ImageBitmap? {
-        cache.get(uriString)?.let { return it }
+        val lowMemory = DevicePerformance.isLowMemory(context)
+        val budget = if (lowMemory) 8 * 1024 * 1024 else 24 * 1024 * 1024
+        if (cache.maxSize() != budget) cache.resize(budget)
+        val width = (if (lowMemory) reqW.coerceAtMost(1280) else reqW).coerceAtLeast(1)
+        val height = (if (lowMemory) reqH.coerceAtMost(720) else reqH).coerceAtLeast(1)
+        val key = "$uriString@$width:$height"
+        cache.get(key)?.let { return it }
         return withContext(Dispatchers.IO) {
-            val bytes = runCatching { readBytes(context, uriString) }
-                .onFailure { Log.w(TAG, "fetch failed [$uriString]: ${it.javaClass.simpleName} ${it.message}") }
-                .getOrNull() ?: return@withContext null
-            val bmp = runCatching { decodeSampled(bytes, reqW, reqH) }.getOrNull()
-            if (bmp == null) Log.w(TAG, "decode failed [$uriString]") else cache.put(uriString, bmp)
-            bmp
+            decodePermit.withPermit {
+                cache.get(key)?.let { return@withPermit it }
+                val bitmap = runCatching { loadSampled(context, uriString, width, height) }
+                    .onFailure { Log.w(TAG, "Load failed: $uriString", it) }
+                    .getOrNull()
+                if (bitmap != null) cache.put(key, bitmap)
+                bitmap
+            }
         }
     }
 
-    private fun readBytes(context: Context, uriString: String): ByteArray {
+    private fun loadSampled(context: Context, uriString: String, width: Int, height: Int): ImageBitmap? {
         val uri = Uri.parse(uriString)
-        return when (uri.scheme?.lowercase()) {
-            "http", "https" -> {
-                val conn = (URL(uriString).openConnection() as HttpURLConnection).apply {
-                    connectTimeout = 8000
-                    readTimeout = 8000
-                    instanceFollowRedirects = true
-                }
-                try {
-                    conn.inputStream.use(InputStream::readBytes)
-                } finally {
-                    conn.disconnect()
+        if (uri.scheme?.lowercase() !in listOf("http", "https")) {
+            return decodeSampled(width, height) { context.contentResolver.openInputStream(uri) }
+        }
+
+        // Spool compressed data to disk instead of retaining full image files in the TV heap.
+        val file = File.createTempFile("artwork-", ".img", context.cacheDir)
+        val connection = (URL(uriString).openConnection() as HttpURLConnection).apply {
+            connectTimeout = 8000
+            readTimeout = 8000
+            instanceFollowRedirects = true
+        }
+        try {
+            connection.inputStream.use { input ->
+                file.outputStream().use { output ->
+                    val buffer = ByteArray(8192)
+                    var total = 0
+                    var count = input.read(buffer)
+                    while (count != -1) {
+                        total += count
+                        check(total <= 16 * 1024 * 1024) { "Artwork exceeds 16 MiB" }
+                        output.write(buffer, 0, count)
+                        count = input.read(buffer)
+                    }
                 }
             }
-
-            else -> context.contentResolver.openInputStream(uri)?.use(InputStream::readBytes)
-                ?: error("null input stream")
+            return decodeSampled(width, height) { file.inputStream() }
+        } finally {
+            connection.disconnect()
+            file.delete()
         }
     }
 
-    private fun decodeSampled(bytes: ByteArray, reqW: Int, reqH: Int): ImageBitmap? {
+    private fun decodeSampled(reqW: Int, reqH: Int, open: () -> InputStream?): ImageBitmap? {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        open()?.use { BitmapFactory.decodeStream(it, null, bounds) }
         if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
         var sample = 1
-        while (bounds.outWidth / (sample * 2) >= reqW && bounds.outHeight / (sample * 2) >= reqH) sample *= 2
-        val opts = BitmapFactory.Options().apply { inSampleSize = sample }
-        return BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)?.asImageBitmap()
+        while (bounds.outWidth / sample > reqW || bounds.outHeight / sample > reqH) sample *= 2
+        val options = BitmapFactory.Options().apply { inSampleSize = sample }
+        return open()?.use { BitmapFactory.decodeStream(it, null, options) }?.asImageBitmap()
     }
 }

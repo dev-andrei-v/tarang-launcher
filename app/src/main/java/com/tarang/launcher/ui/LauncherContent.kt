@@ -47,6 +47,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.tv.material3.Text
+import com.tarang.launcher.home.HomeNavigation
 import com.tarang.launcher.data.AppInfo
 import com.tarang.launcher.data.IconLoader
 import kotlinx.coroutines.launch
@@ -143,9 +144,11 @@ fun LauncherContent(
     glassLive: Boolean = true,
     glassRefract: Boolean = true,
     glassBlur: Boolean = true,
+    navigation: HomeNavigation = HomeNavigation(),
 ) {
     val gridRows = remember(gridApps, columns) { gridApps.chunked(columns) }
     val firstCard = remember { FocusRequester() }
+    val firstGridCard = remember { FocusRequester() }
     val hasDock = dockApps.isNotEmpty()
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
@@ -207,7 +210,7 @@ fun LauncherContent(
             state = listState,
             modifier = Modifier
                 .fillMaxSize()
-                .topFadeMask(TopFadeHeight),
+                .then(if (iconLoader.isLowMemory) Modifier else Modifier.topFadeMask(TopFadeHeight)),
             // No horizontal content padding: the grid rows and the dock apply their own side insets, so
             // the dock's frosted bar can reach a DockPad past the grid margin (see the dock item below).
             contentPadding = PaddingValues(top = topGap, bottom = 56.dp),
@@ -272,7 +275,9 @@ fun LauncherContent(
                     tileWidth = gridTileW,
                     tileHeight = gridTileH,
                     modifier = Modifier.padding(horizontal = SidePad), // own side inset (no list padding)
-                    firstCardFocusRequester = if (!hasDock && index == 0) firstCard else null,
+                    firstCardFocusRequester = if (index == 0) {
+                        if (hasDock) firstGridCard else firstCard
+                    } else null,
                     // Only the very top row sends UP to the settings button.
                     upFocusRequester = if (!hasDock && index == 0) topFocusRequester else null,
                 )
@@ -302,8 +307,19 @@ fun LauncherContent(
     }
 
     val firstPackage = dockApps.firstOrNull()?.packageName ?: gridApps.firstOrNull()?.packageName
-    LaunchedEffect(firstPackage) {
-        if (firstPackage != null) runCatching { firstCard.requestFocus() }
+    LaunchedEffect(firstPackage, navigation) {
+        if (firstPackage == null) return@LaunchedEffect
+        if (navigation.sequence > 0) {
+            menuApp = null
+            movingPackage = null
+            val showGrid = navigation.showAllApps && gridApps.isNotEmpty()
+            listState.scrollToItem(if (showGrid && hasDock) 1 else 0)
+            androidx.compose.runtime.withFrameNanos { }
+            val target = if (showGrid && hasDock) firstGridCard else firstCard
+            runCatching { target.requestFocus() }
+        } else {
+            runCatching { firstCard.requestFocus() }
+        }
     }
 }
 

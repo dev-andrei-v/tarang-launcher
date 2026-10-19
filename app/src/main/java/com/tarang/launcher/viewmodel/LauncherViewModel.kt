@@ -10,6 +10,7 @@ import com.tarang.launcher.data.ApkDownloader
 import com.tarang.launcher.data.AppInfo
 import com.tarang.launcher.data.AppListCache
 import com.tarang.launcher.data.AppRepository
+import com.tarang.launcher.data.DailyWallpaper
 import com.tarang.launcher.data.FavoritesStore
 import com.tarang.launcher.data.IconLoader
 import com.tarang.launcher.data.InstallResult
@@ -65,6 +66,7 @@ class LauncherViewModel(
     private val apkDownloader: ApkDownloader,
     private val updateInstaller: UpdateInstaller,
     private val updateStore: UpdateStore,
+    private val dailyWallpaper: DailyWallpaper,
 ) : ViewModel() {
 
     private val apps = MutableStateFlow<List<AppInfo>>(emptyList())
@@ -120,7 +122,7 @@ class LauncherViewModel(
         viewModelScope.launch {
             repository.packageEvents().debounce(400).collect { refresh(showLoading = false) }
         }
-        viewModelScope.launch { probeForUpdateOnLaunch() }
+        if (UpdateChecker.ENABLED) viewModelScope.launch { probeForUpdateOnLaunch() }
     }
 
     /** [showLoading] is false for background refreshes (e.g. install/uninstall) so the grid
@@ -148,7 +150,9 @@ class LauncherViewModel(
         prefetchJob?.cancel()
         prefetchJob = viewModelScope.launch(Dispatchers.IO) {
             delay(PREFETCH_DELAY_MS)
-            for (app in apps) runCatching { iconLoader.loadTile(app) }
+            for (app in if (iconLoader.isLowMemory) apps.take(12) else apps) {
+                runCatching { iconLoader.loadTile(app) }
+            }
         }
     }
 
@@ -177,6 +181,21 @@ class LauncherViewModel(
     fun setColumns(n: Int) = viewModelScope.launch { settingsStore.setColumns(n) }.let {}
     fun setImageWallpaper(path: String) = viewModelScope.launch { settingsStore.setImageWallpaper(path) }.let {}
     fun setUseImageWallpaper(value: Boolean) = viewModelScope.launch { settingsStore.setUseImageWallpaper(value) }.let {}
+    fun setDailyWallpaper(value: Boolean) = viewModelScope.launch {
+        settingsStore.setDailyWallpaper(value)
+        if (value) dailyWallpaper.refreshIfDue(System.currentTimeMillis())
+    }.let {}
+    fun setDailyWallpaperHours(hours: Int) = viewModelScope.launch {
+        settingsStore.setDailyWallpaperHours(hours)
+        dailyWallpaper.refreshIfDue(System.currentTimeMillis())
+    }.let {}
+    fun setDeviceKind(address: String, kind: com.tarang.launcher.data.DeviceKind?) =
+        viewModelScope.launch { settingsStore.setDeviceKind(address, kind) }.let {}
+    fun setAutoConnectDevice(address: String?, name: String?) =
+        viewModelScope.launch { settingsStore.setAutoConnectDevice(address, name) }.let {}
+    /** Downloads the next daily picture when one is due, or at once when [force] is true. */
+    fun refreshDailyWallpaper(force: Boolean = false) =
+        viewModelScope.launch { dailyWallpaper.refreshIfDue(System.currentTimeMillis(), force) }.let {}
     fun setUseAppArtwork(value: Boolean) = viewModelScope.launch { settingsStore.setUseAppArtwork(value) }.let {}
     fun setArtworkApp(packageName: String, enabled: Boolean) =
         viewModelScope.launch { settingsStore.setArtworkApp(packageName, enabled) }.let {}
@@ -217,6 +236,7 @@ class LauncherViewModel(
      *   without waiting five minutes after a successful "is there an update?" probe.
      */
     fun checkForUpdate(force: Boolean = false) {
+        if (!UpdateChecker.ENABLED) return
         _updateState.value = UpdateUiState.Checking
         viewModelScope.launch {
             _updateState.value = when (
@@ -370,11 +390,12 @@ class LauncherViewModel(
             apkDownloader: ApkDownloader,
             updateInstaller: UpdateInstaller,
             updateStore: UpdateStore,
+            dailyWallpaper: DailyWallpaper,
         ): ViewModelProvider.Factory = viewModelFactory {
             initializer {
                 LauncherViewModel(
                     repository, favoritesStore, settingsStore, appListCache, iconLoader,
-                    updateChecker, apkDownloader, updateInstaller, updateStore,
+                    updateChecker, apkDownloader, updateInstaller, updateStore, dailyWallpaper,
                 )
             }
         }

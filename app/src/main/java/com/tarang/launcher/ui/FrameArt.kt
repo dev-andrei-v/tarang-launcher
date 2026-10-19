@@ -51,19 +51,20 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
 import androidx.tv.material3.Text
 import com.tarang.launcher.R
+import com.tarang.launcher.data.DevicePerformance
 import com.tarang.launcher.data.FrameClockPosition
 import com.tarang.launcher.data.FrameClockSize
 import com.tarang.launcher.data.FrameSource
 import com.tarang.launcher.data.LauncherSettings
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
 import java.util.Locale
 import kotlin.math.PI
 import kotlin.math.sin
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 
 private const val FADE_MS = 1600
 private const val FLOAT_PERIOD_MS = 36_000 // one full figure-8 loop — very slow on purpose
@@ -181,8 +182,10 @@ fun FrameSlideshow(
  * still wallpaper costs nothing and doesn't keep the GPU awake — important on weak TV hardware.
  */
 @Composable
-fun Modifier.frameParallax(enabled: Boolean, amount: () -> Float = { 1f }): Modifier =
-    if (enabled) {
+fun Modifier.frameParallax(enabled: Boolean, amount: () -> Float = { 1f }): Modifier {
+    val context = LocalContext.current
+    val lowMemory = remember(context) { DevicePerformance.isLowMemory(context) }
+    return if (lowMemory) this else if (enabled) {
         val transition = rememberInfiniteTransition(label = "frameFloat")
         val phase by transition.animateFloat(
             initialValue = 0f,
@@ -208,6 +211,7 @@ fun Modifier.frameParallax(enabled: Boolean, amount: () -> Float = { 1f }): Modi
             scaleY = FRAME_BASE_SCALE
         }
     }
+}
 
 @OptIn(ExperimentalTextApi::class)
 private fun interWeight(w: Int) = Font(

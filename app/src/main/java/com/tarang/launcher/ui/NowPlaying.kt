@@ -1,5 +1,8 @@
 package com.tarang.launcher.ui
 
+import android.app.ActivityManager
+import android.os.Build
+import android.content.Intent
 import android.content.ComponentName
 import android.content.Context
 import android.media.MediaMetadata
@@ -43,8 +46,9 @@ private fun NowPlaying?.sameDisplay(other: NowPlaying?): Boolean = when {
 fun rememberNowPlaying(enabled: Boolean): NowPlaying? {
     val context = LocalContext.current
     var np by remember { mutableStateOf<NowPlaying?>(null) }
-    RunWhileStarted(enabled) {
-        if (!enabled) return@RunWhileStarted
+    val supported = remember(context) { supportsNotificationAccess(context) }
+    RunWhileStarted(enabled, supported) {
+        if (!enabled || !supported) return@RunWhileStarted
         val msm = context.getSystemService(Context.MEDIA_SESSION_SERVICE) as? MediaSessionManager
             ?: return@RunWhileStarted
         val component = ComponentName(context, TarangNotificationListenerService::class.java)
@@ -54,7 +58,7 @@ fun rememberNowPlaying(enabled: Boolean): NowPlaying? {
             delay(2500)
         }
     }
-    return if (enabled) np else null
+    return if (enabled && supported) np else null
 }
 
 private fun readNowPlaying(msm: MediaSessionManager, component: ComponentName): NowPlaying? = runCatching {
@@ -78,7 +82,24 @@ private fun readNowPlaying(msm: MediaSessionManager, component: ComponentName): 
 
 /** Whether Tarang's notification listener is enabled (required to read media sessions). */
 fun isNotificationAccessGranted(context: Context): Boolean =
-    NotificationManagerCompat.getEnabledListenerPackages(context).contains(context.packageName)
+    supportsNotificationAccess(context) &&
+        NotificationManagerCompat.getEnabledListenerPackages(context).contains(context.packageName)
 
-/** Intent action for the system's notification-access settings screen. */
-const val NOTIFICATION_ACCESS_ACTION: String = Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS
+/** Android 10 and earlier block notification listeners in system low-memory mode. */
+fun supportsNotificationAccess(context: Context): Boolean =
+    Build.VERSION.SDK_INT > Build.VERSION_CODES.Q ||
+        context.getSystemService(ActivityManager::class.java)?.isLowRamDevice != true
+
+/** Prefer the app-specific access screen, then the listener list. Some TV firmware has neither. */
+fun notificationAccessIntent(context: Context): Intent? {
+    val intents = buildList {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            add(Intent(Settings.ACTION_NOTIFICATION_LISTENER_DETAIL_SETTINGS).putExtra(
+                Settings.EXTRA_NOTIFICATION_LISTENER_COMPONENT_NAME,
+                ComponentName(context, TarangNotificationListenerService::class.java).flattenToString(),
+            ))
+        }
+        add(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+    }
+    return intents.firstOrNull { it.resolveActivity(context.packageManager) != null }
+}

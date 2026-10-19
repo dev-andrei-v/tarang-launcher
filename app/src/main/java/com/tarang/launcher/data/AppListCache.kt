@@ -25,7 +25,7 @@ class AppListCache(context: Context) {
             (0 until arr.length()).map { i ->
                 val o = arr.getJSONObject(i)
                 AppInfo(
-                    label = o.getString("label"),
+                    label = AppPresentation.label(o.getString("pkg"), o.getString("label")),
                     packageName = o.getString("pkg"),
                     activityName = o.getString("activity"),
                     isTvApp = o.getBoolean("tv"),

@@ -8,13 +8,15 @@ import android.graphics.BitmapFactory
 import android.graphics.drawable.Drawable
 import android.util.LruCache
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.core.content.ContextCompat
 import androidx.core.graphics.drawable.toBitmap
 import androidx.palette.graphics.Palette
+import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
-import java.io.File
 
 /**
  * Artwork for one app tile.
@@ -38,8 +40,20 @@ sealed interface TileArt {
  */
 class IconLoader(context: Context) {
 
-    private val pm: PackageManager = context.applicationContext.packageManager
-    private val tileCache = LruCache<String, TileArt>(CACHE_ENTRIES)
+    val isLowMemory = DevicePerformance.isLowMemory(context)
+
+    private val appContext = context.applicationContext
+    private val pm: PackageManager = appContext.packageManager
+    private val tileCache = object : LruCache<String, TileArt>(
+        if (isLowMemory) 4 * 1024 * 1024 else 12 * 1024 * 1024,
+    ) {
+        override fun sizeOf(key: String, value: TileArt): Int = when (value) {
+            is TileArt.Banner -> value.image.asAndroidBitmap().allocationByteCount
+            is TileArt.Fallback -> value.icon?.asAndroidBitmap()?.allocationByteCount ?: 1
+        }
+    }
+
+    fun clearMemory() = tileCache.evictAll()
     private val colorCache = LruCache<String, Int>(CACHE_ENTRIES)
 
     private val diskDir = File(context.applicationContext.filesDir, "tiles")
@@ -54,7 +68,12 @@ class IconLoader(context: Context) {
         tileCache.get(app.packageName)?.let { return it }
         return withContext(Dispatchers.IO) {
             tileCache.get(app.packageName)?.let { return@withContext it }
-            val tile = loadTileFromDisk(app) ?: resolveTile(app)
+            // Local overrides bypass old disk art and render once into the memory cache.
+            val override = AppPresentation.banner(app.packageName)
+            val tile = if (override != null) {
+                val drawable = requireNotNull(ContextCompat.getDrawable(appContext, override))
+                TileArt.Banner(drawable.toBitmap(BANNER_W, BANNER_H).asImageBitmap())
+            } else loadTileFromDisk(app) ?: resolveTile(app)
             tileCache.put(app.packageName, tile)
             tile
         }
@@ -62,6 +81,7 @@ class IconLoader(context: Context) {
 
     /** Brand color drawn from the app's icon, used for the ambient wallpaper tint. */
     suspend fun accentColor(app: AppInfo): Color {
+        AppPresentation.accent(app.packageName)?.let { return Color(it) }
         colorCache.get(app.packageName)?.let { return Color(it) }
         return withContext(Dispatchers.IO) {
             val argb = resolveIcon(app)?.let { colorFromDrawable(it) } ?: DEFAULT_TILE_ARGB

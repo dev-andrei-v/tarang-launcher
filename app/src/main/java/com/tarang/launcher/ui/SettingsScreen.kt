@@ -51,29 +51,27 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
-import kotlinx.coroutines.yield
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
-import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
-import kotlinx.coroutines.delay
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -84,6 +82,10 @@ import androidx.tv.material3.Surface
 import androidx.tv.material3.Text
 import com.tarang.launcher.data.AppArtwork
 import com.tarang.launcher.data.AppInfo
+import com.tarang.launcher.data.DAILY_WALLPAPER_HOURS
+import com.tarang.launcher.data.DeviceKind
+import com.tarang.launcher.data.DevicePerformance
+import com.tarang.launcher.data.UpdateChecker
 import com.tarang.launcher.data.FRAME_AUTOSTART_TIMEOUTS
 import com.tarang.launcher.data.FRAME_INTERVALS
 import com.tarang.launcher.data.FrameClockPosition
@@ -99,9 +101,12 @@ import com.tarang.launcher.data.WeatherUnit
 import com.tarang.launcher.home.HomeSetup
 import com.tarang.launcher.viewmodel.UpdateUiState
 import java.io.File
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.yield
 
 private enum class SettingsSection(val title: String) {
     APPEARANCE("Appearance"),
+    CONNECTIONS("Wi-Fi & Bluetooth"),
     FRAME_ART("Frame Art"),
     WEATHER("Weather"),
     HOME_SETUP("Home setup"),
@@ -126,6 +131,11 @@ fun SettingsScreen(
     onColumns: (Int) -> Unit,
     onPickImage: () -> Unit,
     onUseImage: () -> Unit,
+    onDailyWallpaper: (Boolean) -> Unit,
+    onDailyWallpaperHours: (Int) -> Unit,
+    onRefreshDailyWallpaper: () -> Unit,
+    onAutoConnectDevice: (String?, String?) -> Unit,
+    onDeviceKind: (String, DeviceKind?) -> Unit,
     onScanTvContent: () -> Unit,
     favoriteApps: List<AppInfo>,
     onUseAppArtwork: (Boolean) -> Unit,
@@ -165,16 +175,22 @@ fun SettingsScreen(
     onRequestInstallPermission: () -> Unit,
     onClose: () -> Unit,
     startAtUpdates: Boolean = false,
+    startAtConnections: Boolean = false,
 ) {
     val colors = LocalLauncherColors.current
     var section by remember {
-        mutableStateOf(if (startAtUpdates) SettingsSection.UPDATES else SettingsSection.APPEARANCE)
+        mutableStateOf(when {
+            startAtUpdates -> SettingsSection.UPDATES
+            startAtConnections -> SettingsSection.CONNECTIONS
+            else -> SettingsSection.APPEARANCE
+        })
     }
     // Hold Updates through Checking/Downloading and a short settle after, so a focus blip
     // onto Appearance cannot dispose the result pane before the next action chip focuses.
     var holdUpdatesSection by remember { mutableStateOf(false) }
     val firstSection = remember { FocusRequester() }
     val updatesSection = remember { FocusRequester() }
+    val connectionsSection = remember { FocusRequester() }
 
     BackHandler { onClose() }
 
@@ -189,10 +205,11 @@ fun SettingsScreen(
                 .padding(start = 56.dp, end = 56.dp, top = 44.dp, bottom = 0.dp),
         ) {
             // Left: section list.
-            Column(modifier = Modifier.width(280.dp).fillMaxHeight()) {
+            Column(modifier = Modifier.width(280.dp).fillMaxHeight().verticalScroll(rememberScrollState())) {
                 Text("Settings", color = colors.text, fontSize = 34.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(28.dp))
-                SettingsSection.entries.forEachIndexed { i, s ->
+                // Updates stay hidden while UpdateChecker.ENABLED is false (a fork without a release feed).
+                SettingsSection.entries.filter { it != SettingsSection.UPDATES || UpdateChecker.ENABLED }.forEachIndexed { i, s ->
                     SectionNavRow(
                         title = s.title,
                         active = section == s,
@@ -205,6 +222,7 @@ fun SettingsScreen(
                         },
                         modifier = when {
                             s == SettingsSection.UPDATES -> Modifier.focusRequester(updatesSection)
+                            s == SettingsSection.CONNECTIONS -> Modifier.focusRequester(connectionsSection)
                             i == 0 -> Modifier.focusRequester(firstSection)
                             else -> Modifier
                         },
@@ -245,6 +263,9 @@ fun SettingsScreen(
                         onColumns = onColumns,
                         onPickImage = onPickImage,
                         onUseImage = onUseImage,
+                        onDailyWallpaper = onDailyWallpaper,
+                        onDailyWallpaperHours = onDailyWallpaperHours,
+                        onRefreshDailyWallpaper = onRefreshDailyWallpaper,
                         favoriteApps = favoriteApps,
                         onUseAppArtwork = onUseAppArtwork,
                         onToggleArtworkApp = onToggleArtworkApp,
@@ -255,6 +276,14 @@ fun SettingsScreen(
                         onNowPlaying = onNowPlaying,
                         onNavSounds = onNavSounds,
                         onOpenNotificationAccess = onOpenNotificationAccess,
+                    )
+
+                    SettingsSection.CONNECTIONS -> ConnectionsPane(
+                        autoConnectAddress = settings.autoConnectAddress,
+                        autoConnectName = settings.autoConnectName,
+                        onAutoConnectDevice = onAutoConnectDevice,
+                        deviceKinds = settings.deviceKinds,
+                        onDeviceKind = onDeviceKind,
                     )
 
                     SettingsSection.FRAME_ART -> FrameArtPane(
@@ -326,7 +355,11 @@ fun SettingsScreen(
 
     // Open on Updates when the home banner sent the user here; otherwise Appearance.
     LaunchedEffect(Unit) {
-        val target = if (startAtUpdates) updatesSection else firstSection
+        val target = when {
+            startAtUpdates -> updatesSection
+            startAtConnections -> connectionsSection
+            else -> firstSection
+        }
         runCatching { target.requestFocus() }
     }
 
@@ -388,6 +421,7 @@ private fun SectionNavRow(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun AppearancePane(
     settings: LauncherSettings,
@@ -396,6 +430,9 @@ private fun AppearancePane(
     onColumns: (Int) -> Unit,
     onPickImage: () -> Unit,
     onUseImage: () -> Unit,
+    onDailyWallpaper: (Boolean) -> Unit,
+    onDailyWallpaperHours: (Int) -> Unit,
+    onRefreshDailyWallpaper: () -> Unit,
     favoriteApps: List<AppInfo>,
     onUseAppArtwork: (Boolean) -> Unit,
     onToggleArtworkApp: (String, Boolean) -> Unit,
@@ -407,8 +444,11 @@ private fun AppearancePane(
     onNavSounds: (Boolean) -> Unit,
     onOpenNotificationAccess: () -> Unit,
 ) {
+    val context = LocalContext.current
     val thumb = rememberWallpaperThumb(settings.wallpaperImagePath)
-    val imageActive = settings.useImageWallpaper
+    val dailyThumb = rememberWallpaperThumb(settings.dailyWallpaperPath)
+    val dailyActive = settings.dailyWallpaper
+    val imageActive = settings.useImageWallpaper && !dailyActive
 
     Column(
         modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
@@ -437,11 +477,12 @@ private fun AppearancePane(
         }
 
         SectionLabel("Wallpaper")
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        // Wrap: six presets plus the photo and daily swatches do not fit in one row on a TV pane.
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             WallpaperPresets.forEachIndexed { i, preset ->
                 PresetSwatch(
                     preset = preset,
-                    selected = !imageActive && i == settings.wallpaperId,
+                    selected = !imageActive && !dailyActive && i == settings.wallpaperId,
                     onClick = { onWallpaper(i) },
                 )
             }
@@ -455,6 +496,19 @@ private fun AppearancePane(
                         else -> onPickImage()
                     }
                 },
+            )
+            PhotoSwatch(
+                thumb = dailyThumb,
+                label = "Daily",
+                selected = dailyActive,
+                onClick = { onDailyWallpaper(true) },
+            )
+        }
+        if (dailyActive) {
+            DailyWallpaperSection(
+                settings = settings,
+                onHours = onDailyWallpaperHours,
+                onRefresh = onRefreshDailyWallpaper,
             )
         }
 
@@ -481,13 +535,16 @@ private fun AppearancePane(
         )
 
         SectionLabel("Glass blur")
-        Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-            ToggleChip("On", settings.glassBlur) { onGlassBlur(true) }
-            ToggleChip("Off", !settings.glassBlur) { onGlassBlur(false) }
+        val supportsGlass = remember { DevicePerformance.supportsGlass(context) }
+        if (supportsGlass) {
+            Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                ToggleChip("On", settings.glassBlur) { onGlassBlur(true) }
+                ToggleChip("Off", !settings.glassBlur) { onGlassBlur(false) }
+            }
         }
         Text(
-            "Frosts the wallpaper behind the top bar and dock. Turning it off (a flat tint instead) is " +
-                "the single biggest GPU saving on a slower TV.",
+            if (supportsGlass) "Frosts the wallpaper behind the top bar and dock. Turn it off to reduce GPU use."
+            else "This TV uses transparent panels to reduce memory and GPU use.",
             color = LocalLauncherColors.current.textDim,
             fontSize = 13.sp,
             modifier = Modifier.fillMaxWidth(0.85f),
@@ -517,6 +574,57 @@ private fun AppearancePane(
 }
 
 /**
+ * Daily picture controls: the rotation interval, a manual refresh, and the picture credit.
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun DailyWallpaperSection(
+    settings: LauncherSettings,
+    onHours: (Int) -> Unit,
+    onRefresh: () -> Unit,
+) {
+    val colors = LocalLauncherColors.current
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        SectionLabel("Daily picture")
+        // Wrap: five chips do not fit in one row on a TV pane.
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            DAILY_WALLPAPER_HOURS.forEach { h ->
+                ToggleChip(dailyIntervalLabel(h), h == settings.dailyWallpaperHours) { onHours(h) }
+            }
+            ToggleChip("New picture", false) { onRefresh() }
+        }
+        Text(
+            settings.dailyWallpaperCaption?.takeIf { it.isNotBlank() }
+                ?: "Waiting for the first picture. Connect the TV to the internet.",
+            color = colors.text,
+            fontSize = 13.sp,
+            modifier = Modifier.fillMaxWidth(0.85f),
+        )
+        Text(
+            "Pictures come from the Bing daily image archive. Tarang keeps the last eight pictures on " +
+                "the TV and rotates them when the TV is offline.",
+            color = colors.textDim,
+            fontSize = 13.sp,
+            modifier = Modifier.fillMaxWidth(0.85f),
+        )
+    }
+}
+
+private fun kindLabel(kind: DeviceKind) = when (kind) {
+    DeviceKind.REMOTE -> "Remote"
+    DeviceKind.SPEAKER -> "Speaker"
+    DeviceKind.HEADPHONES -> "Headphones"
+    DeviceKind.EARBUDS -> "Earbuds"
+    DeviceKind.OTHER -> "Bluetooth"
+}
+
+private fun dailyIntervalLabel(hours: Int) = when (hours) {
+    24 -> "Every day"
+    1 -> "Hourly"
+    else -> "$hours hours"
+}
+
+/**
  * "Now playing" chip toggle. When on, needs notification access (the permission that lets us read the
  * device's active media sessions); surfaces the live grant state + a shortcut, re-checked on resume.
  */
@@ -528,6 +636,13 @@ private fun NowPlayingSection(
 ) {
     val colors = LocalLauncherColors.current
     SectionLabel("Now playing")
+    val context = LocalContext.current
+    val supported = remember(context) { supportsNotificationAccess(context) }
+    if (!supported) {
+        Text("Unavailable on this TV. Android 10 blocks notification access in low-memory mode.",
+            color = colors.textDim, fontSize = 13.sp, modifier = Modifier.fillMaxWidth(0.85f))
+        return
+    }
     Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
         ToggleChip("On", enabled) { onEnabled(true) }
         ToggleChip("Off", !enabled) { onEnabled(false) }
@@ -544,7 +659,12 @@ private fun NowPlayingSection(
             StatusRow("Notification access", ok = true, okText = "Granted", offText = "")
         } else {
             Text("Needs notification access to read what's playing.", color = warningColor(colors.isDark), fontSize = 13.sp)
-            ToggleChip("Grant notification access", active = false) { onOpenNotificationAccess() }
+            if (remember(context) { notificationAccessIntent(context) != null }) {
+                ToggleChip("Grant notification access", active = false) { onOpenNotificationAccess() }
+            } else {
+                Text("This TV does not provide a notification-access settings screen.",
+                    color = colors.textDim, fontSize = 13.sp)
+            }
         }
     }
 }
@@ -1085,6 +1205,118 @@ private fun artworkDetail(art: AppArtwork?): String {
     }.joinToString("  ·  ")
 }
 
+/** Open the TV's network and accessory controls. Status does not scan for devices. */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun ConnectionsPane(
+    autoConnectAddress: String?,
+    autoConnectName: String?,
+    onAutoConnectDevice: (String?, String?) -> Unit,
+    deviceKinds: Map<String, DeviceKind>,
+    onDeviceKind: (String, DeviceKind?) -> Unit,
+) {
+    val context = LocalContext.current
+    val colors = LocalLauncherColors.current
+    var permissionRefresh by remember { mutableIntStateOf(0) }
+    val net = rememberNetStatus(permissionRefresh)
+    val wifiPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+        permissionRefresh++
+    }
+    val bluetooth = rememberBluetoothStatus(permissionRefresh).withKinds(deviceKinds)
+    val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
+        permissionRefresh++
+    }
+    Column(
+        modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom = 32.dp),
+        verticalArrangement = Arrangement.spacedBy(18.dp),
+    ) {
+        PaneTitle("Wi-Fi & Bluetooth")
+        SectionLabel("Wi-Fi")
+        Text(net.displayName, color = colors.text, fontSize = 17.sp)
+        if (net.wifiName != null) Text(net.label, color = colors.textDim, fontSize = 14.sp)
+        if (!canReadWifiName(context)) {
+            Text("Android requires location access to show the Wi-Fi name. This access is used only for the network name.",
+                color = colors.textDim, fontSize = 14.sp)
+            ToggleChip("Show Wi-Fi name", active = false) {
+                wifiPermission.launch(arrayOf(android.Manifest.permission.ACCESS_COARSE_LOCATION,
+                    android.Manifest.permission.ACCESS_FINE_LOCATION))
+            }
+        } else if (net.kind == NetKind.WIFI && net.wifiName == null) {
+            Text("Turn on Location in system settings to show the Wi-Fi name.", color = colors.textDim, fontSize = 14.sp)
+            ToggleChip("Open location settings", active = false) { openLocationSettings(context) }
+        }
+        ToggleChip("Open Wi-Fi settings", active = false) { openWifiSettings(context) }
+        Spacer(Modifier.height(8.dp))
+        SectionLabel("Bluetooth")
+        Text(bluetooth.displayName, color = colors.text, fontSize = 17.sp)
+        if (bluetooth.devices.isNotEmpty()) Text(bluetooth.label, color = colors.textDim, fontSize = 14.sp)
+        if (bluetooth.state != BluetoothState.PERMISSION_NEEDED) {
+            SectionLabel("Paired devices")
+            if (bluetooth.paired.isEmpty()) {
+                Text("No paired devices. Pair one in the system Bluetooth settings.", color = colors.textDim, fontSize = 14.sp)
+            }
+            var connecting by remember { mutableStateOf<String?>(null) }
+            bluetooth.paired.forEach { device ->
+                val auto = device.address == autoConnectAddress
+                val chosen = deviceKinds[device.address]
+                Text(device.name, color = colors.text, fontSize = 16.sp, fontWeight = FontWeight.Medium)
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    ToggleChip(
+                        if (device.connected) "Connected" else "Connect",
+                        active = device.connected,
+                    ) {
+                        if (device.connected || connecting != null) return@ToggleChip
+                        connecting = device.name
+                        connectPairedDevice(context, device.address) { ok ->
+                            connecting = null
+                            if (ok) {
+                                permissionRefresh++
+                            } else {
+                                android.widget.Toast.makeText(
+                                    context, "The TV refused the request. Use the system settings.", android.widget.Toast.LENGTH_SHORT,
+                                ).show()
+                                openBluetoothSettings(context)
+                            }
+                        }
+                    }
+                    // One device at a time: choosing another replaces the earlier choice.
+                    ToggleChip(if (auto) "Auto-connect on" else "Auto-connect", active = auto) {
+                        onAutoConnectDevice(if (auto) null else device.address, device.name)
+                    }
+                    // Icon in the top bar. Press the active kind again to return to the default.
+                    Text("Icon:", color = colors.textDim, fontSize = 14.sp, modifier = Modifier.align(Alignment.CenterVertically))
+                    DeviceKind.entries.forEach { kind ->
+                        ToggleChip(kindLabel(kind), active = device.kind == kind) {
+                            onDeviceKind(device.address, if (chosen == kind) null else kind)
+                        }
+                    }
+                }
+            }
+            connecting?.let { Text("Connecting to $it…", color = colors.textDim, fontSize = 14.sp) }
+            if (autoConnectAddress != null) {
+                val known = bluetooth.paired.any { it.address == autoConnectAddress }
+                Text(
+                    if (known) "Tarang connects ${autoConnectName ?: "the chosen device"} each time the launcher is on screen and the device is on."
+                    else "${autoConnectName ?: "The chosen device"} is no longer paired. Pair it again or turn auto-connect off.",
+                    color = colors.textDim, fontSize = 14.sp, modifier = Modifier.fillMaxWidth(0.85f),
+                )
+                if (!known) ToggleChip("Turn auto-connect off", active = false) { onAutoConnectDevice(null, null) }
+            }
+        }
+        ToggleChip("Open Bluetooth settings", active = false) { openBluetoothSettings(context) }
+        if (bluetooth.state == BluetoothState.PERMISSION_NEEDED && android.os.Build.VERSION.SDK_INT >= 31) {
+            Text("Allow access to show the connection status.", color = colors.textDim, fontSize = 14.sp)
+            ToggleChip("Allow Bluetooth status", active = false) {
+                permission.launch(android.Manifest.permission.BLUETOOTH_CONNECT)
+            }
+        }
+        Text(
+            "Use the system settings to join a network or pair a device.",
+            color = colors.textDim, fontSize = 14.sp,
+        )
+    }
+}
+
 /**
  * Make Tarang the device's home screen: live status for the redirect accessibility service and the
  * default-Home app, with deep-links into the relevant system settings. Status refreshes whenever the
@@ -1103,24 +1335,23 @@ private fun HomeSetupPane(
     ) {
         PaneTitle("Home setup")
         Text(
-            "Make Tarang your TV's home screen. Google TV won't let an app set itself as the default " +
-                "Home, so Tarang uses an accessibility service to return here whenever the stock " +
-                "launcher appears.",
+            "Set Tarang as the default Home app when your TV supports it. " +
+                "The accessibility service also supports the remote Apps button and returns from the stock launcher.",
             color = colors.textDim,
             fontSize = 14.sp,
             modifier = Modifier.fillMaxWidth(0.8f),
         )
 
-        StatusRow("Home redirect service", ok = status.isRedirectEnabled, okText = "On", offText = "Off")
+        StatusRow("Home and Apps service", ok = status.isRedirectEnabled, okText = "On", offText = "Off")
         Text(
-            "Bounces back to Tarang whenever the stock launcher comes forward — the reliable way to run " +
-                "Tarang as Home here. Open Accessibility, find Tarang, and turn it on.",
+            "Open Accessibility and enable Tarang Home. The Apps button will open the app grid. " +
+                "Tarang does not read screen content.",
             color = colors.textDim,
             fontSize = 13.sp,
             modifier = Modifier.fillMaxWidth(0.8f),
         )
         ToggleChip(
-            if (status.isRedirectEnabled) "Open accessibility settings" else "Enable redirect service",
+            if (status.isRedirectEnabled) "Open accessibility settings" else "Enable Home and Apps service",
             active = false,
         ) { onOpenAccessibility() }
 
@@ -1129,8 +1360,7 @@ private fun HomeSetupPane(
             ToggleChip("Choose Home app", active = false) { onChooseHome() }
         } else {
             Text(
-                "This device doesn't offer a Home-app chooser, so the redirect service above is what " +
-                    "keeps Tarang in front.",
+                "This device has no Home app chooser. The service can return to Tarang when the stock launcher appears.",
                 color = colors.textDim,
                 fontSize = 13.sp,
                 modifier = Modifier.fillMaxWidth(0.8f),
@@ -1483,6 +1713,7 @@ private fun PhotoSwatch(
     selected: Boolean,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
+    label: String = "＋ Photo",
 ) {
     val colors = LocalLauncherColors.current
     var focused by remember { mutableStateOf(false) }
@@ -1505,7 +1736,7 @@ private fun PhotoSwatch(
                     contentScale = ContentScale.Crop,
                 )
             } else {
-                Text("＋ Photo", color = colors.text, fontSize = 12.sp, maxLines = 1, softWrap = false)
+                Text(label, color = colors.text, fontSize = 12.sp, maxLines = 1, softWrap = false)
             }
             if (focused) FocusRing()
             if (selected) SelectedBadge()

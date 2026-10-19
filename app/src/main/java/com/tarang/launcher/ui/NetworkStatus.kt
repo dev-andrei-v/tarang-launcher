@@ -1,14 +1,23 @@
 package com.tarang.launcher.ui
 
+import android.Manifest
+import android.content.BroadcastReceiver
+import android.content.Intent
+import android.content.IntentFilter
+import android.content.pm.PackageManager
+import android.location.LocationManager
 import android.content.Context
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.wifi.WifiManager
+import android.os.Handler
+import android.os.Looper
 import android.os.Build
+import androidx.core.content.ContextCompat
 import androidx.compose.foundation.Canvas
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
+import androidx.lifecycle.compose.LifecycleStartEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -24,17 +33,39 @@ import androidx.compose.ui.platform.LocalContext
 enum class NetKind { WIFI, ETHERNET, CELLULAR, NONE }
 
 /** Active-connection summary for the status indicator. [wifiLevel] is 0..3 (Wi-Fi only). */
-data class NetStatus(val kind: NetKind, val wifiLevel: Int, val online: Boolean)
+data class NetStatus(val kind: NetKind, val wifiLevel: Int, val online: Boolean, val wifiName: String? = null)
 
-/** Observes the default network and re-reads on every change. */
+fun canReadWifiName(context: Context): Boolean = ContextCompat.checkSelfPermission(
+    context, Manifest.permission.ACCESS_FINE_LOCATION,
+) == PackageManager.PERMISSION_GRANTED
+
+@Suppress("DEPRECATION", "MissingPermission")
+private fun wifiName(wm: WifiManager?): String? = runCatching {
+    wm?.connectionInfo?.ssid?.takeUnless { it == "<unknown ssid>" }
+        ?.removeSurrounding("\"")?.takeIf { it.isNotBlank() }
+}.getOrNull()
+
+val NetStatus.label: String get() = when (kind) {
+    NetKind.WIFI -> if (online) "Wi-Fi connected" else "Wi-Fi: no internet"
+    NetKind.ETHERNET -> if (online) "Ethernet connected" else "Ethernet: no internet"
+    NetKind.CELLULAR -> if (online) "Mobile connected" else "Mobile: no internet"
+    NetKind.NONE -> "Wi-Fi disconnected"
+}
+
+val NetStatus.displayName: String get() = when (kind) {
+    NetKind.WIFI -> wifiName ?: "Wi-Fi"
+    else -> label
+}
+
+/** Observe the default network only while visible. */
 @Composable
-fun rememberNetStatus(): NetStatus {
+fun rememberNetStatus(refreshKey: Int = 0): NetStatus {
     val appContext = LocalContext.current.applicationContext
     val cm = remember { appContext.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager }
     val wm = remember { appContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager }
     var status by remember { mutableStateOf(readStatus(cm, wm)) }
 
-    DisposableEffect(cm) {
+    LifecycleStartEffect(cm, refreshKey) {
         val callback = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) { status = readStatus(cm, wm) }
             override fun onLost(network: Network) { status = readStatus(cm, wm) }
@@ -42,8 +73,25 @@ fun rememberNetStatus(): NetStatus {
                 status = readStatus(cm, wm)
             }
         }
-        runCatching { cm.registerDefaultNetworkCallback(callback) }
-        onDispose { runCatching { cm.unregisterNetworkCallback(callback) } }
+        val registered = runCatching {
+            cm.registerDefaultNetworkCallback(callback, Handler(Looper.getMainLooper()))
+        }.isSuccess
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context, intent: Intent) { status = readStatus(cm, wm) }
+        }
+        val filter = IntentFilter().apply {
+            addAction(WifiManager.NETWORK_STATE_CHANGED_ACTION)
+            addAction(WifiManager.WIFI_STATE_CHANGED_ACTION)
+            addAction(LocationManager.MODE_CHANGED_ACTION)
+        }
+        val receiverRegistered = runCatching {
+            ContextCompat.registerReceiver(appContext, receiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
+        }.isSuccess
+        status = readStatus(cm, wm)
+        onStopOrDispose {
+            if (registered) runCatching { cm.unregisterNetworkCallback(callback) }
+            if (receiverRegistered) runCatching { appContext.unregisterReceiver(receiver) }
+        }
     }
     return status
 }
@@ -51,12 +99,12 @@ fun rememberNetStatus(): NetStatus {
 private fun readStatus(cm: ConnectivityManager, wm: WifiManager?): NetStatus {
     val network = cm.activeNetwork ?: return NetStatus(NetKind.NONE, 0, false)
     val caps = cm.getNetworkCapabilities(network) ?: return NetStatus(NetKind.NONE, 0, false)
-    val online = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+    val online = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
     return when {
         caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> {
             val rssi = wifiRssi(caps, wm)
             val level = if (rssi != null) signalLevel(rssi) else 3
-            NetStatus(NetKind.WIFI, level, online)
+            NetStatus(NetKind.WIFI, level, online, wifiName(wm))
         }
         caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> NetStatus(NetKind.ETHERNET, 3, online)
         caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> NetStatus(NetKind.CELLULAR, 3, online)
@@ -70,7 +118,7 @@ private fun wifiRssi(caps: NetworkCapabilities, wm: WifiManager?): Int? {
         val strength = caps.signalStrength
         if (strength != Int.MIN_VALUE) return strength
     }
-    return wm?.connectionInfo?.rssi
+    return runCatching { wm?.connectionInfo?.rssi }.getOrNull()
 }
 
 @Suppress("DEPRECATION") // static calculateSignalLevel is the only minSdk-28-safe variant

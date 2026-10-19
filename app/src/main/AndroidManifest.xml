@@ -11,6 +11,17 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
 
+    <!-- Android requires location access to disclose the current Wi-Fi name. No location coordinates are read. -->
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+
+    <uses-feature android:name="android.hardware.location.gps" android:required="false" />
+
+    <!-- Read connected Bluetooth profiles. Android 12+ asks only from Connections settings. -->
+    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-feature android:name="android.hardware.bluetooth" android:required="false" />
+
     <!-- Browse the device's photos for the optional image wallpaper (runtime-granted). -->
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
     <uses-permission
@@ -24,6 +35,9 @@
     <!-- App poster art (for artwork wallpapers) is often served from the web, so fetching it
          needs network access. -->
     <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- App removal uses the system confirmation screen on Android 9 and later. -->
+    <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES" />
 
     <!-- Self-update: the user must approve the downloaded APK's install prompt. -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
@@ -60,6 +74,11 @@
                 <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
             </intent-filter>
 
+            <intent-filter>
+                <action android:name="android.intent.action.ALL_APPS" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+
             <!-- HOME entry: lets the device set Tarang as the default launcher (plan §2.1, §8). -->
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -71,6 +90,18 @@
         <!-- Fallback home redirect: when the stock launcher reaches the foreground, bounce back
              to Tarang. set-home-activity is the clean path but doesn't stick on Google TV
              (plan §2.1 / §9), so this service is the reliable mechanism. -->
+        <!-- System screensaver entry: opens Frame Art when the TV goes idle. -->
+        <service
+            android:name=".home.FrameDreamService"
+            android:exported="true"
+            android:label="@string/dream_label"
+            android:permission="android.permission.BIND_DREAM_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.dreams.DreamService" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </service>
+
         <service
             android:name=".home.HomeRedirectService"
             android:exported="true"

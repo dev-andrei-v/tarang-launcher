@@ -5,6 +5,7 @@ import android.content.Intent
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import android.view.KeyEvent
 import android.view.accessibility.AccessibilityEvent
 
 /**
@@ -14,14 +15,26 @@ import android.view.accessibility.AccessibilityEvent
  * this service watches for the stock launcher coming to the foreground and bounces straight back
  * to Tarang.
  *
- * NOTE: this does NOT (and cannot) intercept the HOME key — HOME is consumed by the system's
- * window policy before any service sees it. We react to the resulting foreground change instead.
+ * The Apps key opens Tarang's app grid. Home uses the system's normal launcher path.
  */
 class HomeRedirectService : AccessibilityService() {
 
     private val handler = Handler(Looper.getMainLooper())
     private var lastForegroundPkg: String? = null
     private var pendingRedirect: Runnable? = null
+
+    override fun onKeyEvent(event: KeyEvent): Boolean {
+        if (event.keyCode != KeyEvent.KEYCODE_ALL_APPS) return false
+        if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+            val intent = Intent(this, HomeActivity::class.java)
+                .setAction(Intent.ACTION_ALL_APPS)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            runCatching { startActivity(intent) }
+                .onSuccess { Log.i(TAG, "Apps button opened Tarang") }
+                .onFailure { Log.w(TAG, "Apps button launch failed", it) }
+        }
+        return true
+    }
 
     override fun onDestroy() {
         pendingRedirect?.let { handler.removeCallbacks(it) }

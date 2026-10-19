@@ -57,6 +57,7 @@ Full‑bleed artwork, liquid‑glass chrome, and a dock that gets out of your wa
 
 **Look & feel**
 - **Wallpapers** — gradient presets, your own photo, app artwork, or your Frame Art; rendered sharp and static to stay easy on weak TV GPUs.
+- **Daily picture** — a wallpaper from the Bing daily image archive. Tarang keeps the last eight pictures on the TV, rotates them on a schedule you pick, and shows the cached pictures when the TV is offline.
 - **App‑artwork wallpaper** — plays a favorite's TV poster art full‑screen while it's focused (reads the system TV artwork).
 - **Animation styles** — pick how the big transitions feel: **Default** (chrome scales up and flies apart), **Glide** (fluid springs, no blur), or **Depth** (the home recedes into a painting and dives into an app).
 - **Liquid Glass** — optional AGSL refraction + frosted blur on the chrome (Android 13+, off by default to save GPU on slower TVs), with a flat‑tint fallback everywhere else.
@@ -101,6 +102,52 @@ adb install -r app/build/outputs/apk/release/app-release.apk
 > **Tip:** debug builds run fine on an emulator but are noticeably slow on real TV hardware — use the **release** build on a device.
 
 Then, on the device, open **Settings → Home setup** and follow the steps to make Tarang your home screen.
+
+### Android 10 and 1 GB TVs
+
+Tarang uses transparent panels on Android 10. It does not load `RuntimeShader` or capture a blur backdrop.
+TVs with at most 1.5 GiB RAM, or the Android low-RAM flag, use these limits automatically:
+
+- Keep the dock, app grid, focus effects, and short transitions.
+- Disable blur, refraction, continuous image drift, and the grid fade buffer.
+- Limit the artwork cache to 8 MiB and the tile cache to 4 MiB.
+- Decode wallpapers and artwork within 1280 × 720 pixels.
+- Load one full-size artwork image at a time. Stream downloaded images through a temporary file.
+- Prefetch at most 12 app tiles. Load other tiles when needed.
+- Release cached images when Android reports memory pressure.
+
+Release builds use R8 and resource shrinking. Build with JDK 17 or 21 and Android SDK 35.
+Use the existing baseline profile. Do not generate profiles on a personal TV because that clears app data.
+
+After a sideload, apply the profile and compile the app:
+
+```bash
+adb shell am broadcast -a androidx.profileinstaller.action.INSTALL_PROFILE \
+  -n com.tarang.launcher/androidx.profileinstaller.ProfileInstallReceiver
+adb shell cmd package compile -m speed -f com.tarang.launcher
+adb shell am force-stop com.tarang.launcher
+adb shell am start -n com.tarang.launcher/.home.HomeActivity
+```
+
+Android 10 and earlier block notification listeners in system low-memory mode.
+Tarang shows Now Playing as unavailable on those devices and does not poll media sessions.
+
+### Connections and app tiles
+
+Open **Settings → Wi-Fi & Bluetooth** to change network or accessory settings.
+The passive pill beside the clock shows the Wi-Fi network name and connected Bluetooth device names.
+The Wi-Fi and Bluetooth buttons in the right pill open the system settings directly.
+Status listeners stop when Tarang is hidden. They do not scan for networks or devices.
+Select **Show Wi-Fi name** in Tarang settings to grant the required Android location permission.
+Location must also be enabled in Android. Tarang does not request location coordinates.
+Android 12 and later require Bluetooth access to show its status. Grant access from the Connections page.
+
+SmartTube Stable and Beta use the YouTube name and play icon inside Tarang.
+Their package names and launch targets stay unchanged. App info and uninstall still act on SmartTube.
+
+The local release uses the debug signing key when `keystore.properties` is absent.
+Updates must use the same key. See [the signing guide](README-signing.md).
+
 
 ---
 

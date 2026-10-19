@@ -42,7 +42,8 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
             // Falls back to the debug key when keystore.properties is absent (e.g. a fresh
             // checkout before the release keystore is set up), so the project still builds.
             signingConfig = if (keystoreProperties.containsKey("storeFile")) {

@@ -24,6 +24,7 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import com.tarang.launcher.data.DevicePerformance
 import com.tarang.launcher.data.TvArtwork
 import kotlinx.coroutines.delay
 
@@ -61,14 +62,17 @@ fun AppArtworkWallpaper(
         value = ArtworkLoader.load(context, uris[index % uris.size]) ?: value
     }
 
-    val kb = rememberInfiniteTransition(label = "kenburns")
-    val drift by kb.animateFloat(
-        initialValue = 1f,
-        targetValue = 1.10f,
-        animationSpec = infiniteRepeatable(tween(12_000, easing = LinearEasing), RepeatMode.Reverse),
-        label = "kbScale",
-    )
-    val scale = drift
+    val lowMemory = remember(context) { DevicePerformance.isLowMemory(context) }
+    val scale = if (lowMemory) 1f else {
+        val kb = rememberInfiniteTransition(label = "kenburns")
+        val drift by kb.animateFloat(
+            initialValue = 1f,
+            targetValue = 1.10f,
+            animationSpec = infiniteRepeatable(tween(12_000, easing = LinearEasing), RepeatMode.Reverse),
+            label = "kbScale",
+        )
+        drift
+    }
 
     Box(modifier = modifier.fillMaxSize().background(Color.Black)) {
         Crossfade(targetState = image, animationSpec = tween(FADE_MS), label = "poster") { img ->

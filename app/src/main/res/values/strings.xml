@@ -2,5 +2,6 @@
 <resources>
     <string name="app_name">Tarang</string>
     <string name="accessibility_service_label">Tarang Home</string>
-    <string name="accessibility_service_description">Lets Tarang act as your home screen: when the system launcher opens, Tarang opens instead. Tarang reads only which app is in the foreground and does not collect personal data.</string>
+    <string name="dream_label">Tarang Frame Art</string>
+    <string name="accessibility_service_description">Opens Tarang when the system launcher appears. Makes the remote Apps button open the app grid. Tarang checks foreground app names and handles the Apps key. It does not read screen content.</string>
 </resources>

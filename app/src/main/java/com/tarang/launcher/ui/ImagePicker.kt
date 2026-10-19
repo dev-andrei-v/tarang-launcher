@@ -100,7 +100,7 @@ private fun decodeUriThumb(context: Context, uri: Uri, reqW: Int, reqH: Int): Im
     context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
     if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
     var sample = 1
-    while (bounds.outHeight / 2 / sample >= reqH && bounds.outWidth / 2 / sample >= reqW) sample *= 2
+    while (bounds.outHeight / sample > reqH || bounds.outWidth / sample > reqW) sample *= 2
     val opts = BitmapFactory.Options().apply { inSampleSize = sample }
     context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, opts) }?.asImageBitmap()
 }.getOrNull()

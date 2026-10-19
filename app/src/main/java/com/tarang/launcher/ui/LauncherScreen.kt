@@ -22,16 +22,20 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.ui.text.font.FontWeight
+import com.tarang.launcher.data.DeviceKind
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.derivedStateOf
@@ -81,6 +85,7 @@ import com.tarang.launcher.data.FrameSource
 import com.tarang.launcher.data.LauncherSettings
 import com.tarang.launcher.data.WeatherUnit
 import com.tarang.launcher.di.AppContainer
+import com.tarang.launcher.home.HomeNavigation
 import com.tarang.launcher.home.HomeSetup
 import com.tarang.launcher.viewmodel.LauncherViewModel
 import kotlinx.coroutines.Dispatchers
@@ -92,6 +97,9 @@ import java.io.File
 // Cap the frosted-glass backdrop re-capture at ~20fps (an animated wallpaper would otherwise drive it
 // at 60fps; the blurred backdrop doesn't need that, and the capture is the heaviest per-frame cost).
 private const val BACKDROP_CAPTURE_INTERVAL_NS = 50_000_000L
+
+/** How often the on-screen launcher asks for a due daily picture. */
+private const val DAILY_WALLPAPER_POLL_MS = 15 * 60_000L
 
 // If a started app hasn't covered the launcher after this long, give up on the launch splash and
 // come back home (it would otherwise sit key-locked on top of the launcher).
@@ -105,6 +113,7 @@ private const val LAUNCH_COVER_TIMEOUT_MS = 8_000L
 fun LauncherScreen(
     container: AppContainer,
     modifier: Modifier = Modifier,
+    navigation: HomeNavigation = HomeNavigation(),
 ) {
     val viewModel: LauncherViewModel = viewModel(
         factory = LauncherViewModel.provideFactory(
@@ -117,6 +126,7 @@ fun LauncherScreen(
             container.apkDownloader,
             container.updateInstaller,
             container.updateStore,
+            container.dailyWallpaper,
         ),
     )
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -128,6 +138,8 @@ fun LauncherScreen(
     val settings = settingsOrNull ?: return
     var showSettings by remember { mutableStateOf(false) }
     var openSettingsAtUpdates by remember { mutableStateOf(false) }
+    // The top bar connections button opens Settings on the Wi-Fi & Bluetooth section.
+    var openSettingsAtConnections by remember { mutableStateOf(false) }
     val tuneFocus = remember { FocusRequester() }
     val bannerFocus = remember { FocusRequester() }
 
@@ -177,6 +189,19 @@ fun LauncherScreen(
     val preset = WallpaperPresets.getOrElse(settings.wallpaperId) { WallpaperPresets.first() }
     val imagePath = settings.wallpaperImagePath
     val showImage = settings.useImageWallpaper && imagePath != null && remember(imagePath) { File(imagePath).exists() }
+    // The daily picture: refresh it while the launcher is on-screen. The refresh is a no-op until the
+    // rotation slot changes, so the poll costs nothing between pictures.
+    val dailyPath = settings.dailyWallpaperPath
+    val showDaily = settings.dailyWallpaper && dailyPath != null && remember(dailyPath) { File(dailyPath).exists() }
+    // Connect the chosen Bluetooth device on its own (Settings > Wi-Fi & Bluetooth > Auto-connect).
+    BluetoothAutoConnect(settings.autoConnectAddress)
+    RunWhileStarted(settings.dailyWallpaper, settings.dailyWallpaperHours) {
+        if (!settings.dailyWallpaper) return@RunWhileStarted
+        while (true) {
+            viewModel.refreshDailyWallpaper()
+            delay(DAILY_WALLPAPER_POLL_MS)
+        }
+    }
 
     // While hovering an opted-in favorite, its app artwork plays as the wallpaper; clears (back to the
     // selected wallpaper) when focus leaves the dock. Not while the settings page is up.
@@ -231,6 +256,16 @@ fun LauncherScreen(
     val lifecycleOwner = LocalLifecycleOwner.current
     var interaction by remember { mutableIntStateOf(0) }
     var wakingUp by remember { mutableStateOf(false) }
+    LaunchedEffect(navigation.sequence) {
+        if (navigation.sequence > 0) {
+            showSettings = false
+            openSettingsAtUpdates = false
+            // The screensaver entry opens Frame Art; Home and Apps leave it.
+            frameOn = navigation.startFrame
+            wakingUp = false
+            interaction++
+        }
+    }
     val autoStartMs = settings.frameAutoStartSec * 1000L
     LaunchedEffect(interaction, autoStartMs, lifecycleOwner) {
         if (autoStartMs <= 0L) return@LaunchedEffect
@@ -499,6 +534,12 @@ fun LauncherScreen(
                         modifier = Modifier.fillMaxSize(),
                     )
 
+                    showDaily && dailyPath != null -> ImageWallpaper(
+                        path = dailyPath,
+                        isDark = isDark,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+
                     showImage && imagePath != null -> ImageWallpaper(
                         path = imagePath,
                         isDark = isDark,
@@ -564,6 +605,11 @@ fun LauncherScreen(
                     onColumns = viewModel::setColumns,
                     onPickImage = pickImage,
                     onUseImage = { viewModel.setUseImageWallpaper(true) },
+                    onDailyWallpaper = viewModel::setDailyWallpaper,
+                    onDailyWallpaperHours = viewModel::setDailyWallpaperHours,
+                    onRefreshDailyWallpaper = { viewModel.refreshDailyWallpaper(force = true) },
+                    onAutoConnectDevice = viewModel::setAutoConnectDevice,
+                    onDeviceKind = viewModel::setDeviceKind,
                     onScanTvContent = { showTvProbe = true },
                     favoriteApps = uiState.dockApps,
                     onUseAppArtwork = viewModel::setUseAppArtwork,
@@ -605,8 +651,10 @@ fun LauncherScreen(
                         sounds.back()
                         showSettings = false
                         openSettingsAtUpdates = false
+                        openSettingsAtConnections = false
                     },
                     startAtUpdates = openSettingsAtUpdates,
+                    startAtConnections = openSettingsAtConnections,
 
                 )
             } else {
@@ -623,7 +671,9 @@ fun LauncherScreen(
                         },
                     ) {
                         TopBar(
-                            onOpenSettings = { sounds.click(); openSettingsAtUpdates = false; showSettings = true },
+                            onOpenSettings = { sounds.click(); openSettingsAtUpdates = false; openSettingsAtConnections = false; showSettings = true },
+                            onOpenConnections = { sounds.click(); openSettingsAtUpdates = false; openSettingsAtConnections = true; showSettings = true },
+                            deviceKinds = settings.deviceKinds,
                             onEnterFrame = { sounds.click(); frameOn = true },
                             nowPlaying = nowPlaying,
                             // Clicking the chip jumps back into whatever app is playing, with the
@@ -681,6 +731,7 @@ fun LauncherScreen(
                             uiState.isLoading -> Centered { Text("Loading apps…", color = colors.text, fontSize = 20.sp) }
                             uiState.allApps.isEmpty() -> Centered { Text("No apps found", color = colors.text, fontSize = 20.sp) }
                             else -> LauncherContent(
+                                navigation = navigation,
                                 dockApps = uiState.dockApps,
                                 gridApps = visibleGrid,
                                 iconLoader = container.iconLoader,
@@ -752,6 +803,8 @@ private const val ChipDownscale = 0.34f
 @Composable
 private fun TopBar(
     onOpenSettings: () -> Unit,
+    onOpenConnections: () -> Unit,
+    deviceKinds: Map<String, DeviceKind>,
     onEnterFrame: () -> Unit,
     nowPlaying: NowPlaying?,
     onOpenNowPlaying: (String) -> Unit,
@@ -764,27 +817,21 @@ private fun TopBar(
 ) {
     val context = LocalContext.current
     val net = rememberNetStatus()
+    val bluetooth = rememberBluetoothStatus().withKinds(deviceKinds)
     val colors = LocalLauncherColors.current
     val tint = if (glassBlur) colors.textBackdrop else colors.textBackdropOpaque
-    // A healthy connection is silence: the Wi-Fi chip only appears when something needs attention
-    // (offline, or a weak Wi-Fi signal) and then click-throughs to Wi-Fi settings. Android settings
-    // moved into the launcher Settings page (Home setup), so the resting bar stays minimal.
-    val netNeedsAttention = !net.online || net.kind == NetKind.NONE ||
-        (net.kind == NetKind.WIFI && net.wifiLevel <= 1)
-    // Three anchored slots (start / centre / end) instead of SpaceBetween: the now-playing chip is
-    // centred on the SCREEN, not between the flanking groups, so it doesn't drift when the weather
-    // pill appears.
-    Box(
+    Row(
         modifier = Modifier
             .fillMaxWidth()
             // Extra top/bottom inset so the chips clear the TV bezel and stay distinct from the
             // scrolling dock/grid when content moves up under the bar.
             .padding(start = 56.dp, end = 56.dp, top = 40.dp, bottom = 12.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
         // Left group: clock + (optional) weather, kept together as their own frosted containers so text
         // stays legible over any wallpaper without scrimming the whole image.
         Row(
-            modifier = Modifier.align(Alignment.CenterStart),
             horizontalArrangement = Arrangement.spacedBy(12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -808,43 +855,39 @@ private fun TopBar(
                 }
             }
         }
-        // Centre: the "now playing" chip. Retain the last snapshot while animating out so the exit
-        // doesn't collapse to an empty pill.
+        // Keep the last music snapshot during the exit animation. The middle slot uses the remaining width.
+        // This keeps the pill from becoming empty during the animation.
         var lastNowPlaying by remember { mutableStateOf(nowPlaying) }
         if (nowPlaying != null) lastNowPlaying = nowPlaying
-        AnimatedVisibility(
-            visible = nowPlaying != null,
-            modifier = Modifier.align(Alignment.Center),
-            enter = fadeIn(tween(300)) + scaleIn(initialScale = 0.92f, animationSpec = tween(300)),
-            exit = fadeOut(tween(200)) + scaleOut(targetScale = 0.92f, animationSpec = tween(200)),
-        ) {
-            lastNowPlaying?.let { np ->
-                NowPlayingChip(
-                    nowPlaying = np,
-                    onClick = { onOpenNowPlaying(np.packageName) },
-                    backdrop = backdrop,
-                    tint = tint,
-                    glassLive = glassLive,
-                    glassRefract = glassRefract,
-                    glassBlur = glassBlur,
-                )
+        Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+            androidx.compose.animation.AnimatedVisibility(
+                visible = nowPlaying != null,
+                modifier = Modifier,
+                enter = fadeIn(tween(300)) + scaleIn(initialScale = 0.92f, animationSpec = tween(300)),
+                exit = fadeOut(tween(200)) + scaleOut(targetScale = 0.92f, animationSpec = tween(200)),
+            ) {
+                lastNowPlaying?.let { np ->
+                    NowPlayingChip(
+                        nowPlaying = np,
+                        onClick = { onOpenNowPlaying(np.packageName) },
+                        backdrop = backdrop,
+                        tint = tint,
+                        glassLive = glassLive,
+                        glassRefract = glassRefract,
+                        glassBlur = glassBlur,
+                    )
+                }
             }
         }
         // End group: quiet status + actions, icon-only.
         Row(
             modifier = Modifier
-                .align(Alignment.CenterEnd)
                 .height(ChipHeight)
                 .frostedGlass(backdrop, ChipShape, tint = tint, live = glassLive, refract = glassRefract, blur = glassBlur && glassLive, downscale = ChipDownscale)
                 .padding(horizontal = 8.dp),
             horizontalArrangement = Arrangement.spacedBy(4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            if (netNeedsAttention) {
-                PillButton(onClick = { openWifiSettings(context) }, contentDescription = "Wi-Fi settings") {
-                    WifiIndicator(status = net, tint = colors.text, modifier = Modifier.size(22.dp))
-                }
-            }
             PillButton(onClick = onEnterFrame, contentDescription = "Frame Art") {
                 Image(
                     painterResource(R.drawable.ic_frame),
@@ -852,6 +895,39 @@ private fun TopBar(
                     modifier = Modifier.size(22.dp),
                     colorFilter = ColorFilter.tint(colors.text),
                 )
+            }
+            // One button for the connections: the Wi-Fi glyph (slashed when offline) and one glyph
+            // per connected Bluetooth device, by the kind set in Settings. It opens Tarang's own
+            // Wi-Fi & Bluetooth page.
+            PillButton(onClick = onOpenConnections, contentDescription = "Wi-Fi & Bluetooth") {
+                Row(
+                    modifier = Modifier.padding(horizontal = if (bluetooth.connected.isEmpty()) 0.dp else 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    WifiIndicator(net, Modifier.size(22.dp), colors.text)
+                    bluetooth.connected.forEach { device ->
+                        when (device.kind) {
+                            DeviceKind.REMOTE -> Image(
+                                painterResource(R.drawable.ic_remote), contentDescription = device.name,
+                                modifier = Modifier.size(20.dp), colorFilter = ColorFilter.tint(colors.text),
+                            )
+                            DeviceKind.SPEAKER -> Image(
+                                painterResource(R.drawable.ic_speaker), contentDescription = device.name,
+                                modifier = Modifier.size(20.dp), colorFilter = ColorFilter.tint(colors.text),
+                            )
+                            DeviceKind.HEADPHONES -> Image(
+                                painterResource(R.drawable.ic_headphones), contentDescription = device.name,
+                                modifier = Modifier.size(20.dp), colorFilter = ColorFilter.tint(colors.text),
+                            )
+                            DeviceKind.EARBUDS -> Image(
+                                painterResource(R.drawable.ic_earbuds), contentDescription = device.name,
+                                modifier = Modifier.size(20.dp), colorFilter = ColorFilter.tint(colors.text),
+                            )
+                            DeviceKind.OTHER -> BluetoothIndicator(Modifier.size(20.dp), colors.text)
+                        }
+                    }
+                }
             }
             PillButton(
                 onClick = onOpenSettings,
@@ -881,7 +957,8 @@ private fun PillButton(
     Surface(
         onClick = onClick,
         modifier = modifier
-            .size(40.dp)
+            .height(40.dp)
+            .widthIn(min = 40.dp)
             .semantics { this.contentDescription = contentDescription },
         shape = ClickableSurfaceDefaults.shape(ChipShape),
         scale = ClickableSurfaceDefaults.scale(focusedScale = 1.1f),
@@ -890,7 +967,7 @@ private fun PillButton(
             focusedContainerColor = colors.text.copy(alpha = 0.22f),
         ),
     ) {
-        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { content() }
+        Box(modifier = Modifier.fillMaxHeight().widthIn(min = 40.dp), contentAlignment = Alignment.Center) { content() }
     }
 }
 
@@ -952,12 +1029,6 @@ private fun NowPlayingChip(
     }
 }
 
-private fun openWifiSettings(context: Context) {
-    runCatching {
-        context.startActivity(Intent(Settings.ACTION_WIFI_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-    }
-}
-
 private fun openAndroidSettings(context: Context) {
     runCatching {
         context.startActivity(Intent(Settings.ACTION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
@@ -966,7 +1037,8 @@ private fun openAndroidSettings(context: Context) {
 
 private fun openNotificationAccess(context: Context) {
     runCatching {
-        context.startActivity(Intent(NOTIFICATION_ACCESS_ACTION).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        val intent = notificationAccessIntent(context) ?: return
+        context.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
     }
 }
 

@@ -7,6 +7,7 @@ import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.doublePreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
+import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
@@ -43,6 +44,9 @@ enum class FrameClockSize { SMALL, MEDIUM, LARGE }
 /** Temperature unit for the weather readout. */
 enum class WeatherUnit { CELSIUS, FAHRENHEIT }
 
+/** What a Bluetooth device is, for its status icon. The user can set it per paired device. */
+enum class DeviceKind { REMOTE, SPEAKER, HEADPHONES, EARBUDS, OTHER }
+
 /**
  * The transition "personality" used for the four big moves (enter/exit Frame Art, launch/return an
  * app). An experiment switch so the different motion languages can be A/B'd live on-device.
@@ -70,6 +74,22 @@ data class LauncherSettings(
     val useImageWallpaper: Boolean = false,
     /** Absolute path to the user's chosen wallpaper, copied into app storage. */
     val wallpaperImagePath: String? = null,
+    /** Show a picture from the Bing daily image archive as the wallpaper. */
+    val dailyWallpaper: Boolean = false,
+    /** Hours between daily picture changes (see [DAILY_WALLPAPER_HOURS]). */
+    val dailyWallpaperHours: Int = 24,
+    /** Absolute path to the cached daily picture in use. */
+    val dailyWallpaperPath: String? = null,
+    /** Credit line of the daily picture in use. */
+    val dailyWallpaperCaption: String? = null,
+    /** When the daily picture last changed (epoch millis). */
+    val dailyWallpaperUpdatedAt: Long = 0L,
+    /** Bluetooth address of the paired device that Tarang connects on its own (null = off). */
+    val autoConnectAddress: String? = null,
+    /** Name of that device, for the settings page. */
+    val autoConnectName: String? = null,
+    /** Icon kind chosen per paired Bluetooth device (address to kind). Unset = from the device class. */
+    val deviceKinds: Map<String, DeviceKind> = emptyMap(),
     /** Master switch: while hovering an opted-in favorite, play its artwork as the wallpaper. */
     val useAppArtwork: Boolean = false,
     /** Packages (favorites) whose TV artwork is allowed to take over the wallpaper on hover. */
@@ -128,15 +148,27 @@ data class LauncherSettings(
 /** Persists [LauncherSettings] via DataStore. */
 class SettingsStore(context: Context) {
 
+    private val supportsGlass = DevicePerformance.supportsGlass(context)
     private val dataStore = context.applicationContext.settingsDataStore
 
     val settings: Flow<LauncherSettings> = dataStore.data.map { p ->
         LauncherSettings(
             wallpaperId = p[WALLPAPER_ID] ?: 0,
-            glassBlur = p[GLASS_BLUR] ?: false,
+            glassBlur = supportsGlass && (p[GLASS_BLUR] ?: false),
             columns = (p[COLUMNS] ?: DEFAULT_COLUMNS).coerceIn(MIN_COLUMNS, MAX_COLUMNS),
             useImageWallpaper = p[USE_IMAGE] ?: false,
             wallpaperImagePath = p[IMAGE_PATH],
+            dailyWallpaper = p[DAILY] ?: false,
+            dailyWallpaperHours = (p[DAILY_HOURS] ?: 24).takeIf { it in DAILY_WALLPAPER_HOURS } ?: 24,
+            dailyWallpaperPath = p[DAILY_PATH],
+            dailyWallpaperCaption = p[DAILY_CAPTION],
+            dailyWallpaperUpdatedAt = p[DAILY_UPDATED_AT] ?: 0L,
+            autoConnectAddress = p[AUTO_CONNECT_ADDRESS],
+            autoConnectName = p[AUTO_CONNECT_NAME],
+            deviceKinds = (p[DEVICE_KINDS] ?: emptySet()).mapNotNull { entry ->
+                val sep = entry.lastIndexOf('|')
+                if (sep <= 0) null else runCatching { entry.substring(0, sep) to DeviceKind.valueOf(entry.substring(sep + 1)) }.getOrNull()
+            }.toMap(),
             useAppArtwork = p[USE_APP_ARTWORK] ?: false,
             artworkApps = p[ARTWORK_APPS] ?: emptySet(),
             theme = runCatching { ThemeMode.valueOf(p[THEME] ?: "DARK") }.getOrDefault(ThemeMode.DARK),
@@ -173,10 +205,11 @@ class SettingsStore(context: Context) {
         )
     }
 
-    /** Selecting a gradient preset also switches off the image wallpaper. */
+    /** Selecting a gradient preset also switches off the image and daily wallpapers. */
     suspend fun setWallpaper(id: Int) = dataStore.edit {
         it[WALLPAPER_ID] = id
         it[USE_IMAGE] = false
+        it[DAILY] = false
     }
 
     suspend fun setGlassBlur(value: Boolean) = dataStore.edit { it[GLASS_BLUR] = value }
@@ -186,10 +219,46 @@ class SettingsStore(context: Context) {
     suspend fun setImageWallpaper(path: String) = dataStore.edit {
         it[IMAGE_PATH] = path
         it[USE_IMAGE] = true
+        it[DAILY] = false
     }
 
     /** Re-activates the already-stored photo without re-picking it. */
-    suspend fun setUseImageWallpaper(value: Boolean) = dataStore.edit { it[USE_IMAGE] = value }
+    suspend fun setUseImageWallpaper(value: Boolean) = dataStore.edit {
+        it[USE_IMAGE] = value
+        if (value) it[DAILY] = false
+    }
+
+    /** Turns the daily picture on or off. On also switches off the photo wallpaper. */
+    suspend fun setDailyWallpaper(value: Boolean) = dataStore.edit {
+        it[DAILY] = value
+        if (value) it[USE_IMAGE] = false
+    }
+
+    suspend fun setDailyWallpaperHours(hours: Int) = dataStore.edit { it[DAILY_HOURS] = hours }
+
+    /** Sets the icon kind for one paired device. Null returns to the device class default. */
+    suspend fun setDeviceKind(address: String, kind: DeviceKind?) = dataStore.edit { p ->
+        val rest = (p[DEVICE_KINDS] ?: emptySet()).filterNot { it.startsWith("$address|") }.toSet()
+        p[DEVICE_KINDS] = if (kind == null) rest else rest + "$address|${kind.name}"
+    }
+
+    /** Chooses the paired device to connect on its own. Null clears it. */
+    suspend fun setAutoConnectDevice(address: String?, name: String?) = dataStore.edit {
+        if (address == null) {
+            it.remove(AUTO_CONNECT_ADDRESS)
+            it.remove(AUTO_CONNECT_NAME)
+        } else {
+            it[AUTO_CONNECT_ADDRESS] = address
+            it[AUTO_CONNECT_NAME] = name ?: "Bluetooth device"
+        }
+    }
+
+    /** Records the daily picture that is now in use. */
+    suspend fun setDailyWallpaperPicture(path: String, caption: String, at: Long) = dataStore.edit {
+        it[DAILY_PATH] = path
+        it[DAILY_CAPTION] = caption
+        it[DAILY_UPDATED_AT] = at
+    }
 
     suspend fun setUseAppArtwork(value: Boolean) = dataStore.edit { it[USE_APP_ARTWORK] = value }
 
@@ -259,6 +328,14 @@ class SettingsStore(context: Context) {
         val COLUMNS = intPreferencesKey("columns")
         val USE_IMAGE = booleanPreferencesKey("use_image_wallpaper")
         val IMAGE_PATH = stringPreferencesKey("wallpaper_image_path")
+        val DAILY = booleanPreferencesKey("daily_wallpaper")
+        val DAILY_HOURS = intPreferencesKey("daily_wallpaper_hours")
+        val DAILY_PATH = stringPreferencesKey("daily_wallpaper_path")
+        val DAILY_CAPTION = stringPreferencesKey("daily_wallpaper_caption")
+        val DAILY_UPDATED_AT = longPreferencesKey("daily_wallpaper_updated_at")
+        val AUTO_CONNECT_ADDRESS = stringPreferencesKey("auto_connect_address")
+        val AUTO_CONNECT_NAME = stringPreferencesKey("auto_connect_name")
+        val DEVICE_KINDS = stringSetPreferencesKey("device_kinds")
         val USE_APP_ARTWORK = booleanPreferencesKey("use_app_artwork")
         val ARTWORK_APPS = stringSetPreferencesKey("artwork_apps")
         val THEME = stringPreferencesKey("theme")

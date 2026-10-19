@@ -81,7 +81,7 @@ object TvContentProbe {
 
         val perPackage = linkedMapOf<String, Int>()
         val samples = mutableListOf<TvProbeRow>()
-        var previewPrograms = -1
+        var previewPrograms: Int? = null
         var withPoster = 0
         var withVideo = 0
         var withIntent = 0
@@ -126,7 +126,7 @@ object TvContentProbe {
         return TvProbeResult(
             permissionGranted = granted,
             previewChannels = previewChannels,
-            previewPrograms = previewPrograms,
+            previewPrograms = previewPrograms ?: -1,
             watchNext = watchNext,
             withPoster = withPoster,
             withVideo = withVideo,

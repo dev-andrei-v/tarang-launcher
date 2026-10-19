@@ -10,15 +10,18 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.produceState
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import com.tarang.launcher.data.DevicePerformance
+import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import java.io.File
 
 /**
  * A user-chosen photo as the launcher background. The picked image is copied into app storage
@@ -28,8 +31,12 @@ import java.io.File
  */
 @Composable
 fun ImageWallpaper(path: String, isDark: Boolean, modifier: Modifier = Modifier) {
-    val image by produceState<ImageBitmap?>(initialValue = null, key1 = path) {
-        value = withContext(Dispatchers.IO) { decodeSampled(path, 1920, 1080) }
+    val context = LocalContext.current
+    val lowMemory = remember(context) { DevicePerformance.isLowMemory(context) }
+    val image by produceState<ImageBitmap?>(initialValue = null, key1 = path, key2 = lowMemory) {
+        value = withContext(Dispatchers.IO) {
+            decodeSampled(path, if (lowMemory) 1280 else 1920, if (lowMemory) 720 else 1080)
+        }
     }
     Box(modifier = modifier) {
         val img = image
@@ -83,8 +90,6 @@ private fun decodeSampled(path: String, reqW: Int, reqH: Int): ImageBitmap? = ru
 
 private fun calcInSampleSize(options: BitmapFactory.Options, reqW: Int, reqH: Int): Int {
     var sample = 1
-    var halfH = options.outHeight / 2
-    var halfW = options.outWidth / 2
-    while (halfH / sample >= reqH && halfW / sample >= reqW) sample *= 2
+    while (options.outHeight / sample > reqH || options.outWidth / sample > reqW) sample *= 2
     return sample
 }

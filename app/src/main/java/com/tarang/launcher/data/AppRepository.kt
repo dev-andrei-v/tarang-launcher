@@ -46,7 +46,8 @@ class AppRepository(private val context: Context) {
         return pm.queryIntentActivities(intent, 0).mapNotNull { resolveInfo ->
             val activity = resolveInfo.activityInfo ?: return@mapNotNull null
             AppInfo(
-                label = resolveInfo.loadLabel(pm).toString().ifBlank { activity.packageName },
+                label = AppPresentation.label(activity.packageName,
+                    resolveInfo.loadLabel(pm).toString().ifBlank { activity.packageName }),
                 packageName = activity.packageName,
                 activityName = activity.name,
                 isTvApp = isTv,
@@ -76,8 +77,11 @@ class AppRepository(private val context: Context) {
         awaitClose { runCatching { context.unregisterReceiver(receiver) } }
     }
 
+    private val launchTargets = AppLaunchTargets(context)
+
     private fun launchIntentFor(packageName: String): Intent? =
-        pm.getLeanbackLaunchIntentForPackage(packageName)
+        launchTargets.intentFor(packageName)?.takeIf { pm.resolveActivity(it, 0) != null }
+            ?: pm.getLeanbackLaunchIntentForPackage(packageName)
             ?: pm.getLaunchIntentForPackage(packageName)
 
     /**
@@ -93,6 +97,7 @@ class AppRepository(private val context: Context) {
             return false
         }
         return runCatching { context.startActivity(intent, options) }
+            .onSuccess { launchTargets.markOpened(packageName) }
             .onFailure { Log.w(TAG, "Failed to launch $packageName", it) }
             .isSuccess
     }

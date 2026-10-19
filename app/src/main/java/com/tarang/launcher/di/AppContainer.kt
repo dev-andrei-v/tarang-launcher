@@ -4,6 +4,7 @@ import android.content.Context
 import com.tarang.launcher.data.ApkDownloader
 import com.tarang.launcher.data.AppListCache
 import com.tarang.launcher.data.AppRepository
+import com.tarang.launcher.data.DailyWallpaper
 import com.tarang.launcher.data.FavoritesStore
 import com.tarang.launcher.data.IconLoader
 import com.tarang.launcher.data.SettingsStore
@@ -23,6 +24,7 @@ class AppContainer(context: Context) {
     val iconLoader: IconLoader by lazy { IconLoader(appContext) }
     val favoritesStore: FavoritesStore by lazy { FavoritesStore(appContext) }
     val settingsStore: SettingsStore by lazy { SettingsStore(appContext) }
+    val dailyWallpaper: DailyWallpaper by lazy { DailyWallpaper(appContext, settingsStore) }
     val appListCache: AppListCache by lazy { AppListCache(appContext) }
     val uiSounds: UiSounds by lazy { UiSounds(appContext) }
     val updateStore: UpdateStore by lazy { UpdateStore(appContext) }
