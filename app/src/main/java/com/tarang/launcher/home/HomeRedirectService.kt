@@ -1,7 +1,11 @@
 package com.tarang.launcher.home
 
 import android.accessibilityservice.AccessibilityService
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
+import androidx.core.content.ContextCompat
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
@@ -23,27 +27,69 @@ class HomeRedirectService : AccessibilityService() {
     private var lastForegroundPkg: String? = null
     private var pendingRedirect: Runnable? = null
 
+    private val overlay by lazy { AppsOverlay(this) }
+
+    /** Toggle the overlay from adb or a key mapper. Only senders with WRITE_SECURE_SETTINGS (shell) pass. */
+    private val overlayReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (overlay.isShowing) overlay.hide() else overlay.show()
+        }
+    }
+
+    override fun onServiceConnected() {
+        super.onServiceConnected()
+        runCatching {
+            ContextCompat.registerReceiver(
+                this, overlayReceiver, IntentFilter(ACTION_TOGGLE_OVERLAY),
+                "android.permission.WRITE_SECURE_SETTINGS", null, ContextCompat.RECEIVER_EXPORTED,
+            )
+        }.onFailure { Log.w(TAG, "Overlay receiver failed", it) }
+    }
+
+    /**
+     * Apps over another app shows the overlay (the app keeps running under it). Apps on the home
+     * screen opens the launcher grid. Back or Apps closes the overlay; the D-pad reaches its window.
+     */
     override fun onKeyEvent(event: KeyEvent): Boolean {
+        val down = event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0
+        if (overlay.isShowing) {
+            return when (event.keyCode) {
+                KeyEvent.KEYCODE_BACK, KeyEvent.KEYCODE_ALL_APPS, KeyEvent.KEYCODE_HOME, KeyEvent.KEYCODE_ESCAPE -> {
+                    if (down) overlay.hide()
+                    event.keyCode != KeyEvent.KEYCODE_HOME
+                }
+                else -> false
+            }
+        }
         if (event.keyCode != KeyEvent.KEYCODE_ALL_APPS) return false
-        if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
-            val intent = Intent(this, HomeActivity::class.java)
-                .setAction(Intent.ACTION_ALL_APPS)
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-            runCatching { startActivity(intent) }
-                .onSuccess { Log.i(TAG, "Apps button opened Tarang") }
-                .onFailure { Log.w(TAG, "Apps button launch failed", it) }
+        if (down) {
+            val onHome = lastForegroundPkg == null || lastForegroundPkg == packageName
+            if (onHome) openLauncherGrid() else overlay.show()
         }
         return true
     }
 
+    private fun openLauncherGrid() {
+        val intent = Intent(this, HomeActivity::class.java)
+            .setAction(Intent.ACTION_ALL_APPS)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+        runCatching { startActivity(intent) }
+            .onSuccess { Log.i(TAG, "Apps button opened Tarang") }
+            .onFailure { Log.w(TAG, "Apps button launch failed", it) }
+    }
+
     override fun onDestroy() {
         pendingRedirect?.let { handler.removeCallbacks(it) }
+        overlay.hide()
+        runCatching { unregisterReceiver(overlayReceiver) }
         super.onDestroy()
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event?.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
         val pkg = event.packageName?.toString() ?: return
+        // Another window came up (Home, or an app the overlay started): the overlay is done.
+        if (overlay.isShowing && pkg != packageName) overlay.hide()
         lastForegroundPkg = pkg
         if (pkg !in STOCK_LAUNCHERS) {
             // A non-launcher is in front (e.g. an app returned right after a transient system flash
@@ -76,6 +122,7 @@ class HomeRedirectService : AccessibilityService() {
 
     companion object {
         private const val TAG = "HomeRedirect"
+        const val ACTION_TOGGLE_OVERLAY = "com.tarang.launcher.action.APPS_OVERLAY"
         // How long a stock-launcher foreground must persist before we bounce back to Tarang. Long
         // enough to let a transient flash (a VPN connect) pass; short enough that returning from an app
         // snaps back quickly. Tunable.
